@@ -59,7 +59,7 @@ def parse_departure_time(time_str):
 def scrape_with_proxy(url):
     """Fetch URL using ScraperAPI proxy"""
     if SCRAPER_API_KEY:
-        proxy_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url}&render=false"
+        proxy_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url}&render=true"
         response = requests.get(proxy_url, timeout=30)
         return response
     return None
