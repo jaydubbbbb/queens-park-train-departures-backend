@@ -146,12 +146,18 @@ def fetch_departures_for_platform(stop_code):
         
         if response.status_code != 200:
             print(f"API returned status {response.status_code}")
+            print(f"Response: {response.text[:500]}")
             return []
+        
+        # Debug: Print response
+        print(f"API response status: {response.status_code}")
+        print(f"Response content (first 500 chars): {response.text[:500]}")
         
         data = response.json()
         
         if data.get('result') != 'success':
             print(f"API result not success: {data.get('result')}")
+            print(f"Full response: {data}")
             return []
         
         trips = data.get('trips', [])
