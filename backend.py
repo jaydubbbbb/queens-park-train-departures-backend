@@ -14,6 +14,15 @@ from urllib.parse import urlencode
 app = Flask(__name__)
 CORS(app)
 
+# Perth timezone (UTC+8)
+try:
+    from zoneinfo import ZoneInfo
+    PERTH_TZ = ZoneInfo('Australia/Perth')
+except ImportError:
+    # Fallback for older Python
+    from datetime import timezone, timedelta
+    PERTH_TZ = timezone(timedelta(hours=8))
+
 # Transperth URLs
 LIVE_TIMES_URL = "https://www.transperth.wa.gov.au/Timetables/Live-Train-Times?station=Queens%20Park%20Stn"
 API_URL = "https://www.transperth.wa.gov.au/API/SilverRailRestService/SilverRailService/GetStopTimetable"
@@ -96,11 +105,21 @@ def get_tokens():
 def calculate_minutes_until(depart_time_str):
     """Calculate minutes until departure from ISO format time"""
     try:
+        # Parse the departure time (it's in Perth timezone)
         depart_time = datetime.fromisoformat(depart_time_str)
-        now = datetime.now()
+        
+        # If the departure time doesn't have timezone info, assume it's Perth time
+        if depart_time.tzinfo is None:
+            depart_time = depart_time.replace(tzinfo=PERTH_TZ)
+        
+        # Get current time in Perth timezone
+        now = datetime.now(PERTH_TZ)
+        
+        # Calculate difference
         diff = (depart_time - now).total_seconds() / 60
         return max(0, int(diff))
-    except:
+    except Exception as e:
+        print(f"Error calculating time: {e}")
         return None
 
 def fetch_all_departures():
