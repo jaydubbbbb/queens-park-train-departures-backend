@@ -28,29 +28,57 @@ SCRAPER_API_KEY = os.environ.get('SCRAPER_API_KEY', '')  # Set this in Render en
 
 def parse_departure_time(time_str):
     """Convert time string to minutes from now"""
+    if not time_str:
+        return None
+        
     time_str = time_str.strip().lower()
+    print(f"  Parsing time string: '{time_str}'")
     
+    # Check for "now" or "due"
     if 'now' in time_str or 'due' in time_str:
+        print(f"  -> Identified as NOW/DUE")
         return 0
     
-    match = re.search(r'(\d+)', time_str)
+    # Extract number from string like "5 min" or "5min" or just "5"
+    match = re.search(r'(\d+)\s*min', time_str)
     if match:
-        return int(match.group(1))
+        minutes = int(match.group(1))
+        print(f"  -> Extracted {minutes} minutes")
+        return minutes
     
+    # Just a number (assume minutes)
+    match = re.search(r'^(\d+)$', time_str)
+    if match:
+        minutes = int(match.group(1))
+        print(f"  -> Plain number: {minutes} minutes")
+        return minutes
+    
+    # If it's a time like "19:34" or "7:34 PM", calculate minutes until that time
     time_match = re.search(r'(\d{1,2}):(\d{2})', time_str)
     if time_match:
         hour = int(time_match.group(1))
         minute = int(time_match.group(2))
+        
+        # Check for PM
+        if 'pm' in time_str and hour < 12:
+            hour += 12
+        elif 'am' in time_str and hour == 12:
+            hour = 0
+        
         now = datetime.now()
         departure = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         
+        # If time is earlier than now, assume it's for tomorrow
         if departure < now:
             from datetime import timedelta
             departure += timedelta(days=1)
         
         diff = (departure - now).total_seconds() / 60
-        return int(diff)
+        minutes = int(diff)
+        print(f"  -> Calculated from time {hour}:{minute}: {minutes} minutes")
+        return minutes
     
+    print(f"  -> Could not parse time format")
     return None
 
 def scrape_with_proxy(url):
@@ -137,44 +165,60 @@ def scrape_transperth(url, line_name):
                 # Get all td elements
                 tds = row.find_all('td')
                 
-                if len(tds) < 3:
+                if len(tds) < 2:
+                    print(f"Skipping row with only {len(tds)} columns")
                     continue
                 
                 # First td contains time (with footable-first-column class)
                 time_td = tds[0]
+                
+                # Try to find time in various ways
+                time_text = None
                 time_span = time_td.find('span', class_='footable-toggle')
                 if time_span:
                     time_text = time_span.get_text(strip=True)
                 else:
-                    time_text = time_td.get_text(strip=True).split('\n')[0].strip()
+                    # Get all text and take first line
+                    all_text = time_td.get_text(separator='\n', strip=True)
+                    time_text = all_text.split('\n')[0].strip()
+                
+                print(f"Time extracted: '{time_text}'")
                 
                 # Second td contains destination
                 dest_td = tds[1]
                 destination_text = dest_td.get_text(strip=True)
+                print(f"Destination extracted: '{destination_text}'")
                 
-                # Third td contains platform info
-                platform_td = tds[2]
-                platform_spans = platform_td.find_all('span', style=re.compile('display:inline-block'))
-                
+                # Third td contains platform info (if exists)
                 platform_text = '?'
                 stops_text = 'All Stations'
                 
-                if platform_spans and len(platform_spans) > 0:
-                    # First span usually has "from platform X"
-                    platform_info = platform_spans[0].get_text(strip=True)
-                    platform_match = re.search(r'platform\s+(\d+)', platform_info, re.I)
+                if len(tds) >= 3:
+                    platform_td = tds[2]
+                    platform_all_text = platform_td.get_text(separator='|', strip=True)
+                    print(f"Platform section: '{platform_all_text}'")
+                    
+                    # Look for platform number
+                    platform_match = re.search(r'platform\s+(\d+)', platform_all_text, re.I)
                     if platform_match:
                         platform_text = platform_match.group(1)
                     
-                    # Additional spans may have stops info
-                    if len(platform_spans) > 1:
-                        stops_text = platform_spans[1].get_text(strip=True)
+                    # Extract stops info (text after platform info)
+                    parts = platform_all_text.split('|')
+                    if len(parts) > 1:
+                        stops_text = parts[1].strip()
                 
-                # Parse time
+                # Skip if no time or destination
+                if not time_text or not destination_text:
+                    print(f"Skipping row - missing time or destination")
+                    continue
+                
+                # Parse time to minutes
                 minutes = parse_departure_time(time_text)
+                print(f"Parsed minutes: {minutes}")
                 
-                if minutes is not None and destination_text:
-                    departures.append({
+                if minutes is not None:
+                    departure = {
                         'platform': platform_text,
                         'destination': destination_text,
                         'time_display': time_text,
@@ -182,11 +226,16 @@ def scrape_transperth(url, line_name):
                         'pattern': 'W',
                         'stops': stops_text,
                         'line': line_name
-                    })
-                    print(f"Parsed: {destination_text} from platform {platform_text} in {minutes} min ({time_text})")
+                    }
+                    departures.append(departure)
+                    print(f"✓ Added departure: {destination_text} from platform {platform_text} in {minutes} min")
+                else:
+                    print(f"✗ Could not parse time '{time_text}' to minutes")
                     
             except Exception as e:
                 print(f"Error parsing row: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
         
         return departures
