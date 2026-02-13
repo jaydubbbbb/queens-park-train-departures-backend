@@ -82,9 +82,10 @@ def parse_departure_time(time_str):
     return None
 
 def scrape_with_proxy(url):
-    """Fetch URL using ScraperAPI proxy"""
+    """Fetch URL using ScraperAPI proxy with JavaScript rendering"""
     if SCRAPER_API_KEY:
-        proxy_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url}&render=true"
+        # Wait for the time elements to be populated by JavaScript
+        proxy_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url}&render=true&wait_for_selector=.footable-toggle"
         response = requests.get(proxy_url, timeout=90)
         return response
     return None
