@@ -1,18 +1,12 @@
 """
-Queens Park Station Departure Scraper
-This script scrapes live departure times from Transperth website.
+Queens Park Station Departure Scraper - WITH PROXY SUPPORT
+This version can use ScraperAPI or similar services to bypass restrictions
 
-To use this in production:
-1. Install dependencies: pip install flask beautifulsoup4 requests flask-cors
-2. Run this script on a server: python backend.py
-3. Update the frontend HTML to call this API endpoint instead of simulated data
-4. Deploy both frontend and backend together
-
-Example deployment options:
-- Heroku (free tier available)
-- Railway
-- Render
-- Your own VPS
+To use ScraperAPI (free tier: 1000 requests/month):
+1. Sign up at https://www.scraperapi.com
+2. Get your API key
+3. Set environment variable: SCRAPER_API_KEY=your_key_here
+4. Or paste your key in the code below
 """
 
 from flask import Flask, jsonify, request
@@ -21,15 +15,19 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 import re
+import os
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for frontend access
+CORS(app)
 
 # Transperth URLs
 URLS = {
     'armadale': 'https://www.transperth.wa.gov.au/Timetables/Live-Train-Times?line=Armadale%20Line&station=Queens%20Park%20Stn',
     'thornlie': 'https://www.transperth.wa.gov.au/Timetables/Live-Train-Times?line=Thornlie-Cockburn%20Line&station=Queens%20Park%20Stn'
 }
+
+# ScraperAPI configuration (optional but recommended)
+SCRAPER_API_KEY = os.environ.get('SCRAPER_API_KEY', '')  # Set this in Render environment variables
 
 def parse_departure_time(time_str):
     """Convert time string to minutes from now"""
@@ -38,12 +36,10 @@ def parse_departure_time(time_str):
     if 'now' in time_str or 'due' in time_str:
         return 0
     
-    # Extract number from string like "5 min" or "5min"
     match = re.search(r'(\d+)', time_str)
     if match:
         return int(match.group(1))
     
-    # If it's a time like "10:45", calculate minutes until that time
     time_match = re.search(r'(\d{1,2}):(\d{2})', time_str)
     if time_match:
         hour = int(time_match.group(1))
@@ -51,7 +47,6 @@ def parse_departure_time(time_str):
         now = datetime.now()
         departure = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         
-        # If time is earlier, assume it's for tomorrow
         if departure < now:
             from datetime import timedelta
             departure += timedelta(days=1)
@@ -61,55 +56,99 @@ def parse_departure_time(time_str):
     
     return None
 
+def scrape_with_proxy(url):
+    """Fetch URL using ScraperAPI proxy"""
+    if SCRAPER_API_KEY:
+        proxy_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url}&render=false"
+        response = requests.get(proxy_url, timeout=30)
+        return response
+    return None
+
+def scrape_direct(url):
+    """Direct fetch with enhanced headers"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-AU,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': 'https://www.transperth.wa.gov.au/',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Cache-Control': 'max-age=0'
+    }
+    
+    session = requests.Session()
+    return session.get(url, headers=headers, timeout=15)
+
 def scrape_transperth(url, line_name):
     """Scrape departure information from Transperth website"""
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        # Try proxy first if available
+        if SCRAPER_API_KEY:
+            print(f"Using ScraperAPI proxy for {line_name}")
+            response = scrape_with_proxy(url)
+        else:
+            print(f"Direct fetch for {line_name}")
+            response = scrape_direct(url)
         
-        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.content, 'html.parser')
         departures = []
         
-        # Find departure rows (adjust selectors based on actual HTML structure)
-        # This is a generic approach - you'll need to inspect the actual HTML
-        departure_rows = soup.find_all('tr', class_=re.compile('departure|train|service'))
+        # Method 1: Look for table rows
+        departure_rows = soup.find_all('tr', class_=re.compile('departure|train|service|row'))
         
-        if not departure_rows:
-            # Try alternative selectors
-            departure_rows = soup.find_all('div', class_=re.compile('departure|train|service'))
+        # Method 2: Look for divs if no table
+        if not departure_rows or len(departure_rows) < 2:
+            departure_rows = soup.find_all('div', class_=re.compile('departure|train|service|card'))
+        
+        # Method 3: Look for list items
+        if not departure_rows or len(departure_rows) < 2:
+            departure_rows = soup.find_all('li', class_=re.compile('departure|train|service'))
+        
+        print(f"Found {len(departure_rows)} potential departure rows for {line_name}")
         
         for row in departure_rows:
             try:
-                # Extract information (adjust based on actual HTML structure)
-                platform = row.find(class_=re.compile('platform|plat'))
-                destination = row.find(class_=re.compile('destination|dest'))
-                time = row.find(class_=re.compile('time|depart|due'))
-                pattern = row.find(class_=re.compile('pattern|type'))
-                stops = row.find(class_=re.compile('stops|via'))
+                # Try multiple selector patterns
+                platform = (row.find(class_=re.compile('platform|plat', re.I)) or 
+                           row.find(string=re.compile('Platform', re.I)))
+                destination = (row.find(class_=re.compile('destination|dest|train', re.I)) or
+                              row.find('strong') or row.find('b'))
+                time = (row.find(class_=re.compile('time|depart|due|minute', re.I)) or
+                       row.find(string=re.compile(r'\d+\s*min|\d+:\d+|now|due', re.I)))
                 
-                if platform and destination and time:
-                    platform_text = platform.get_text(strip=True)
-                    destination_text = destination.get_text(strip=True)
-                    time_text = time.get_text(strip=True)
-                    pattern_text = pattern.get_text(strip=True) if pattern else 'W'
-                    stops_text = stops.get_text(strip=True) if stops else 'All Stations'
+                if destination and time:
+                    # Extract text
+                    if isinstance(platform, str):
+                        platform_text = platform
+                    else:
+                        platform_text = platform.get_text(strip=True) if platform else '?'
+                    
+                    if isinstance(destination, str):
+                        destination_text = destination
+                    else:
+                        destination_text = destination.get_text(strip=True)
+                    
+                    if isinstance(time, str):
+                        time_text = time
+                    else:
+                        time_text = time.get_text(strip=True)
                     
                     minutes = parse_departure_time(time_text)
                     
-                    if minutes is not None:
+                    if minutes is not None and destination_text:
                         departures.append({
                             'platform': platform_text,
                             'destination': destination_text,
                             'time_display': time_text,
                             'minutes': minutes,
-                            'pattern': pattern_text,
-                            'stops': stops_text,
+                            'pattern': 'W',
+                            'stops': 'All Stations',
                             'line': line_name
                         })
+                        print(f"Parsed: {destination_text} in {minutes} min")
             except Exception as e:
                 print(f"Error parsing row: {e}")
                 continue
@@ -117,7 +156,7 @@ def scrape_transperth(url, line_name):
         return departures
     
     except requests.RequestException as e:
-        print(f"Error fetching {url}: {e}")
+        print(f"Network error fetching {url}: {e}")
         return []
     except Exception as e:
         print(f"Error processing departures: {e}")
@@ -127,17 +166,17 @@ def scrape_transperth(url, line_name):
 def get_departures():
     """API endpoint to get all departures"""
     try:
-        # Scrape both lines
+        print("Fetching departures...")
         armadale_departures = scrape_transperth(URLS['armadale'], 'Armadale')
         thornlie_departures = scrape_transperth(URLS['thornlie'], 'Thornlie-Cockburn')
         
-        # Combine and separate by direction
         all_departures = armadale_departures + thornlie_departures
+        print(f"Total departures found: {len(all_departures)}")
         
-        # Separate Perth-bound vs South-bound
+        # Separate by direction
         perth_departures = [
             d for d in all_departures 
-            if 'perth' in d['destination'].lower() and 'perth' not in d['destination'].lower().replace('perth', '')
+            if 'perth' in d['destination'].lower()
         ]
         
         south_departures = [
@@ -145,18 +184,19 @@ def get_departures():
             if d not in perth_departures
         ]
         
-        # Sort by time
         perth_departures.sort(key=lambda x: x['minutes'])
         south_departures.sort(key=lambda x: x['minutes'])
         
         return jsonify({
             'success': True,
-            'perth': perth_departures[:10],  # Limit to next 10
+            'perth': perth_departures[:10],
             'south': south_departures[:10],
-            'last_updated': datetime.now().isoformat()
+            'last_updated': datetime.now().isoformat(),
+            'using_proxy': bool(SCRAPER_API_KEY)
         })
     
     except Exception as e:
+        print(f"Error in get_departures: {e}")
         return jsonify({
             'success': False,
             'error': str(e)
@@ -167,29 +207,33 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'proxy_enabled': bool(SCRAPER_API_KEY)
     })
 
 @app.route('/')
 def index():
-    """Serve a simple info page"""
-    return '''
+    """Serve info page"""
+    proxy_status = "✅ Enabled" if SCRAPER_API_KEY else "❌ Disabled (may have access issues)"
+    return f'''
     <html>
         <head><title>Queens Park Station API</title></head>
         <body style="font-family: Arial; padding: 40px; max-width: 600px; margin: 0 auto;">
-            <h1>Queens Park Station Departure API</h1>
-            <p>This is the backend API for scraping Transperth live departure times.</p>
+            <h1>🚆 Queens Park Station API</h1>
+            <p><strong>Status:</strong> Running</p>
+            <p><strong>Proxy:</strong> {proxy_status}</p>
             <h2>Endpoints:</h2>
             <ul>
-                <li><code>GET /api/departures</code> - Get all departures</li>
-                <li><code>GET /api/health</code> - Health check</li>
+                <li><a href="/api/health">/api/health</a> - Health check</li>
+                <li><a href="/api/departures">/api/departures</a> - Get departures</li>
             </ul>
-            <h2>Frontend Setup:</h2>
-            <p>Update your frontend JavaScript to call:</p>
-            <pre style="background: #f0f0f0; padding: 10px; border-radius: 5px;">
-const response = await fetch('http://your-backend-url/api/departures');
-const data = await response.json();
-            </pre>
+            <h2>Setup Proxy (Recommended):</h2>
+            <ol>
+                <li>Sign up at <a href="https://www.scraperapi.com">ScraperAPI</a> (1000 free requests/month)</li>
+                <li>Copy your API key</li>
+                <li>In Render: Go to Environment → Add SCRAPER_API_KEY</li>
+                <li>Restart your service</li>
+            </ol>
         </body>
     </html>
     '''
@@ -197,9 +241,10 @@ const data = await response.json();
 if __name__ == '__main__':
     print("🚆 Queens Park Station Departure API")
     print("=" * 50)
-    print("Starting server on http://localhost:5000")
-    print("API endpoint: http://localhost:5000/api/departures")
-    print("\nNote: This needs to be deployed on a server that can access")
-    print("Transperth website. Local development may have network restrictions.")
+    if SCRAPER_API_KEY:
+        print("✅ ScraperAPI proxy enabled")
+    else:
+        print("⚠️  No proxy - may face access restrictions")
+        print("   Consider setting SCRAPER_API_KEY environment variable")
     print("=" * 50)
     app.run(debug=True, host='0.0.0.0', port=5000)
