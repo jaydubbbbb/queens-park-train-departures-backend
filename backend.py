@@ -1,6 +1,6 @@
 """
-Queens Park Station Departure Scraper - FINAL VERSION
-Calls Transperth's official API directly - FREE and RELIABLE!
+Transperth Station Departure Scraper - FIXED VERSION
+Now with complete browser headers including sec-ch-ua client hints
 """
 
 from flask import Flask, jsonify, request
@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 import re
 from urllib.parse import urlencode
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -19,7 +20,6 @@ try:
     from zoneinfo import ZoneInfo
     PERTH_TZ = ZoneInfo('Australia/Perth')
 except ImportError:
-    # Fallback for older Python
     from datetime import timezone, timedelta
     PERTH_TZ = timezone(timedelta(hours=8))
 
@@ -27,114 +27,143 @@ except ImportError:
 LIVE_TIMES_URL = "https://www.transperth.wa.gov.au/Timetables/Live-Train-Times"
 API_URL = "https://www.transperth.wa.gov.au/API/SilverRailRestService/SilverRailService/GetStopTimetable"
 
-# Cache for tokens (so we don't fetch page every time)
-token_cache = {
+# Persistent session
+SESSION = None
+TOKEN_CACHE = {
     'verification_token': None,
-    'module_id': None,
-    'tab_id': None,
-    'cookies': None,
+    'module_id': '5111',
+    'tab_id': '248',
     'timestamp': None
 }
 
+def get_session():
+    """Get or create a persistent session with complete browser headers"""
+    global SESSION
+    if SESSION is None:
+        SESSION = requests.Session()
+        # Complete Chrome 122 headers including Client Hints
+        SESSION.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en,zh-CN;q=0.9,zh;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'Cache-Control': 'max-age=0'
+        })
+    return SESSION
+
 def fetch_page_tokens():
-    """Fetch the verification token and other required values from the page"""
+    """Fetch the verification token from the page"""
     try:
-        print("Fetching page tokens...")
-        session = requests.Session()
+        print("\n" + "="*60)
+        print("FETCHING PAGE TOKENS")
+        print("="*60)
         
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        }
+        session = get_session()
         
-        response = session.get(LIVE_TIMES_URL, headers=headers, timeout=10)
+        print(f"→ GET {LIVE_TIMES_URL}")
+        response = session.get(LIVE_TIMES_URL, timeout=15)
+        
+        print(f"← Status: {response.status_code}")
+        
+        if response.status_code == 403:
+            print("\n❌ 403 FORBIDDEN")
+            return None
         
         if response.status_code != 200:
-            print(f"Failed to fetch page: {response.status_code}")
+            print(f"❌ Failed: {response.status_code}")
             return None
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Find RequestVerificationToken (usually in a hidden input or meta tag)
+        # Find RequestVerificationToken
         token_input = soup.find('input', {'name': '__RequestVerificationToken'})
         if token_input:
             verification_token = token_input.get('value')
         else:
-            # Try meta tag
             token_meta = soup.find('meta', {'name': '__RequestVerificationToken'})
             verification_token = token_meta.get('content') if token_meta else None
         
-        # Find ModuleId and TabId (often in script or data attributes)
-        module_id = '5111'  # From your headers
-        tab_id = '248'      # From your headers
-        
         if verification_token:
-            print(f"✓ Got verification token: {verification_token[:20]}...")
+            print(f"✅ Token: {verification_token[:30]}...")
+            print(f"✅ Cookies: {len(session.cookies)} cookie(s)")
+            
+            # Print cookie names for debugging
+            cookie_names = [cookie.name for cookie in session.cookies]
+            print(f"✅ Cookie names: {', '.join(cookie_names)}")
+            
             return {
                 'verification_token': verification_token,
-                'module_id': module_id,
-                'tab_id': tab_id,
-                'cookies': session.cookies,
+                'module_id': '5111',
+                'tab_id': '248',
                 'timestamp': datetime.now()
             }
         else:
-            print("✗ Could not find verification token")
+            print("❌ Could not find verification token")
             return None
             
     except Exception as e:
-        print(f"Error fetching tokens: {e}")
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def get_tokens():
     """Get tokens from cache or fetch new ones"""
-    # Check if cache is fresh (less than 5 minutes old)
-    if token_cache['timestamp']:
-        age = (datetime.now() - token_cache['timestamp']).total_seconds()
-        if age < 300:  # 5 minutes
-            return token_cache
+    if TOKEN_CACHE['timestamp']:
+        age = (datetime.now() - TOKEN_CACHE['timestamp']).total_seconds()
+        if age < 300 and TOKEN_CACHE['verification_token']:  # 5 minutes
+            print("ℹ Using cached tokens")
+            return TOKEN_CACHE
     
-    # Fetch new tokens
     tokens = fetch_page_tokens()
     if tokens:
-        token_cache.update(tokens)
+        TOKEN_CACHE.update(tokens)
     
-    return token_cache
+    return TOKEN_CACHE
 
 def calculate_minutes_until(depart_time_str):
-    """Calculate minutes until departure from ISO format time"""
+    """Calculate minutes until departure"""
     try:
-        # Parse the departure time (it's in Perth timezone)
         depart_time = datetime.fromisoformat(depart_time_str)
-        
-        # If the departure time doesn't have timezone info, assume it's Perth time
         if depart_time.tzinfo is None:
             depart_time = depart_time.replace(tzinfo=PERTH_TZ)
-        
-        # Get current time in Perth timezone
         now = datetime.now(PERTH_TZ)
-        
-        # Calculate difference
         diff = (depart_time - now).total_seconds() / 60
         return max(0, int(diff))
     except Exception as e:
-        print(f"Error calculating time: {e}")
         return None
 
 def fetch_all_departures(station_id='133'):
     """Fetch all departures for specified station"""
     try:
-        # Get fresh tokens
+        print("\n" + "="*60)
+        print(f"FETCHING DEPARTURES FOR STATION {station_id}")
+        print("="*60)
+        
+        # Get tokens
         tokens = get_tokens()
         
         if not tokens.get('verification_token'):
-            print("No verification token available")
+            print("❌ No verification token available")
             return []
         
-        # Get current date/time
+        session = get_session()
+        
+        # Prepare data
         now = datetime.now()
         search_date = now.strftime('%Y-%m-%d')
         search_time = now.strftime('%H:%M')
         
-        # Prepare form data (application/x-www-form-urlencoded)
         form_data = {
             'StationId': station_id,
             'SearchDate': search_date,
@@ -142,87 +171,93 @@ def fetch_all_departures(station_id='133'):
             'IsRealTimeChecked': 'true'
         }
         
+        # Complete headers for API call - matching your browser exactly
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': '*/*',
             'Accept-Language': 'en,zh-CN;q=0.9,zh;q=0.8',
             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'DNT': '1',
             'Origin': 'https://www.transperth.wa.gov.au',
-            'Referer': LIVE_TIMES_URL,
+            'Referer': f'https://www.transperth.wa.gov.au/Timetables/Live-Train-Times',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
             'X-Requested-With': 'XMLHttpRequest',
-            'Requestverificationtoken': tokens['verification_token'],
-            'Moduleid': tokens['module_id'],
-            'Tabid': tokens['tab_id']
+            'RequestVerificationToken': tokens['verification_token'],
+            'ModuleId': tokens['module_id'],
+            'TabId': tokens['tab_id'],
+            'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"'
         }
         
-        print(f"Fetching from API for station {station_id} at {search_time}...")
-        response = requests.post(
+        print(f"→ POST {API_URL}")
+        print(f"  Station: {station_id}, Time: {search_time}")
+        print(f"  Token: {tokens['verification_token'][:30]}...")
+        
+        response = session.post(
             API_URL,
             data=urlencode(form_data),
             headers=headers,
-            cookies=tokens.get('cookies'),
-            timeout=10
+            timeout=15
         )
         
-        if response.status_code != 200:
-            print(f"API returned status {response.status_code}")
-            print(f"Response: {response.text[:500]}")
+        print(f"← Status: {response.status_code}")
+        
+        if response.status_code == 403:
+            print("\n❌ 403 FORBIDDEN on API call")
+            print("Even with complete headers, still blocked.")
+            print("This might be IP-based or cookie-based blocking.")
             return []
         
-        # Debug: Print response
-        print(f"API response status: {response.status_code}")
-        print(f"Response content (first 500 chars): {response.text[:500]}")
+        if response.status_code != 200:
+            print(f"❌ API returned {response.status_code}")
+            print(f"Response: {response.text[:300]}")
+            return []
         
-        data = response.json()
+        try:
+            data = response.json()
+        except Exception as e:
+            print(f"❌ Failed to parse JSON: {e}")
+            return []
         
         if data.get('result') != 'success':
-            print(f"API result not success: {data.get('result')}")
+            print(f"❌ API result: {data.get('result')}")
             print(f"Full response: {data}")
             return []
         
         trips = data.get('trips', [])
-        print(f"Found {len(trips)} trips for station {station_id}")
+        print(f"✅ Found {len(trips)} trips")
         
         departures = []
         
         for trip in trips:
             try:
-                # Extract platform number from stop name
                 stop_name = trip.get('StopTimetableStop', {}).get('Name', '')
-                platform_match = re.search(r'Platform\s+(\d+)', stop_name)
+                platform_match = re.search(r'Platform\s+(\d+(?:/\d+)?)', stop_name)
                 platform = platform_match.group(1) if platform_match else '?'
                 
-                # Get destination
                 summary = trip.get('Summary', {})
                 headsign = summary.get('Headsign', '')
-                direction = summary.get('Direction', '0')  # 0 = To Perth, 1 = From Perth
+                direction = summary.get('Direction', '0')
                 
-                # Get display info
                 display_title = trip.get('DisplayTripTitle', '')
-                display_description = trip.get('DisplayTripDescription', '')
-                display_status = trip.get('DisplayTripStatus', '')
                 countdown = trip.get('DisplayTripStatusCountDown', '')
                 
-                # Get route info
                 route_name = summary.get('RouteName', '')
-                display_route_code = trip.get('DisplayRouteCode', '')
                 
-                # Get real-time info
-                real_time = trip.get('RealTimeInfo', {})
                 real_time_info = summary.get('RealTimeInfo', {})
                 series = real_time_info.get('Series', 'W')
                 num_cars = real_time_info.get('NumCars', '')
                 fleet_number = real_time_info.get('FleetNumber', '')
                 
-                # Calculate minutes
                 depart_time = trip.get('DepartTime', '')
                 minutes = calculate_minutes_until(depart_time)
                 
                 if minutes is None:
                     continue
                 
-                # Build stops description
-                stops = f"All Stations"
+                stops = "All Stations"
                 if num_cars:
                     stops = f"{stops} ({num_cars} cars)"
                 if series:
@@ -231,26 +266,22 @@ def fetch_all_departures(station_id='133'):
                 departures.append({
                     'platform': platform,
                     'destination': display_title or headsign,
-                    'time_display': countdown or display_status,
+                    'time_display': countdown,
                     'minutes': minutes,
                     'pattern': series or 'W',
                     'stops': stops,
                     'route': route_name,
-                    'route_code': display_route_code,
                     'direction': direction,
                     'fleetNumber': fleet_number
                 })
                 
-                print(f"  ✓ {display_title or headsign} in {minutes} min from platform {platform} (dir: {direction}, fleet: {fleet_number})")
-                
             except Exception as e:
-                print(f"Error parsing trip: {e}")
                 continue
         
         return departures
         
     except Exception as e:
-        print(f"Error fetching from API: {e}")
+        print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
         return []
@@ -259,18 +290,10 @@ def fetch_all_departures(station_id='133'):
 def get_departures():
     """Get all departures for specified station"""
     try:
-        # Get station_id from query parameter, default to Queens Park
         station_id = request.args.get('station_id', '133')
         
-        print("=" * 50)
-        print(f"Fetching departures for station {station_id}...")
-        
-        # Fetch all departures in one call
         all_deps = fetch_all_departures(station_id)
         
-        print(f"\nTotal departures: {len(all_deps)}")
-        
-        # Separate by direction (0 = To Perth, 1 = From Perth)
         perth = [d for d in all_deps if d.get('direction') == '0']
         south = [d for d in all_deps if d.get('direction') == '1']
         
@@ -286,44 +309,69 @@ def get_departures():
         })
         
     except Exception as e:
-        print(f"Error in get_departures: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Error: {e}")
         return jsonify({
             'success': False,
             'error': str(e)
         }), 500
 
+@app.route('/api/test', methods=['GET'])
+def test_connection():
+    """Quick test"""
+    print("\n" + "="*60)
+    print("RUNNING TEST")
+    print("="*60)
+    
+    # Test page access
+    session = get_session()
+    response = session.get(LIVE_TIMES_URL, timeout=10)
+    
+    page_ok = response.status_code == 200
+    
+    # Test token extraction
+    tokens = fetch_page_tokens() if page_ok else None
+    token_ok = bool(tokens and tokens.get('verification_token'))
+    
+    # Test API call
+    deps = fetch_all_departures('133') if token_ok else []
+    api_ok = len(deps) > 0
+    
+    result = {
+        'page_access': {'status': response.status_code, 'ok': page_ok},
+        'token_extraction': {'ok': token_ok},
+        'api_call': {'ok': api_ok, 'departures': len(deps)},
+        'overall': 'working' if (page_ok and token_ok and api_ok) else 'blocked'
+    }
+    
+    return jsonify(result)
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check"""
-    return jsonify({
-        'status': 'healthy',
-        'timestamp': datetime.now().isoformat()
-    })
+    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
 
 @app.route('/')
 def index():
     """Info page"""
     return '''
     <html>
-        <head><title>Queens Park Station API</title></head>
-        <body style="font-family: Arial; padding: 40px; max-width: 600px; margin: 0 auto;">
-            <h1>🚆 Queens Park Station API</h1>
-            <p><strong>Status:</strong> Running (using Transperth's official API)</p>
-            <p><strong>Free:</strong> No API keys or external services needed!</p>
+        <head><title>Transperth API</title></head>
+        <body style="font-family: Arial; padding: 40px; max-width: 700px; margin: 0 auto;">
+            <h1>🚆 Transperth Live Departures API</h1>
+            <p><strong>Status:</strong> Running with complete browser headers</p>
             <h2>Endpoints:</h2>
             <ul>
                 <li><a href="/api/health">/api/health</a> - Health check</li>
-                <li><a href="/api/departures">/api/departures</a> - Get live departures</li>
+                <li><a href="/api/test">/api/test</a> - Test if working</li>
+                <li><a href="/api/departures?station_id=133">/api/departures</a> - Get departures</li>
             </ul>
         </body>
     </html>
     '''
 
 if __name__ == '__main__':
-    print("🚆 Queens Park Station API - FREE VERSION")
-    print("=" * 50)
-    print("Using Transperth's official API - completely free!")
-    print("=" * 50)
+    print("🚆 Transperth API - COMPLETE HEADERS VERSION")
+    print("="*60)
+    print("Now includes sec-ch-ua client hints")
+    print("="*60)
     app.run(debug=True, host='0.0.0.0', port=5000)
