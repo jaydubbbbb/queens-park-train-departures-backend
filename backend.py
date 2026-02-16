@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 import re
 from urllib.parse import urlencode
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -35,6 +36,14 @@ token_cache = {
     'cookies': None,
     'timestamp': None
 }
+
+# Cache for departure responses (reduce API calls)
+departure_cache = {
+    'data': None,
+    'timestamp': None,
+    'station_id': None
+}
+CACHE_DURATION = 20  # Cache departures for 20 seconds
 
 def fetch_page_tokens():
     """Fetch the verification token and other required values from the page"""
@@ -278,6 +287,17 @@ def get_departures():
         # Get station_id from query parameter, default to 133 (Queens Park)
         station_id = request.args.get('station_id', '133')
         
+        # Check cache first
+        now = time.time()
+        if (departure_cache['data'] and 
+            departure_cache['station_id'] == station_id and
+            now - departure_cache['timestamp'] < CACHE_DURATION):
+            
+            cache_age = int(now - departure_cache['timestamp'])
+            print(f"✓ Returning cached data for station {station_id} (age: {cache_age}s)")
+            return jsonify(departure_cache['data'])
+        
+        # Cache miss - fetch fresh data
         print("=" * 50)
         print(f"Fetching departures for station {station_id}...")
         
@@ -293,13 +313,20 @@ def get_departures():
         perth.sort(key=lambda x: x['minutes'])
         south.sort(key=lambda x: x['minutes'])
         
-        return jsonify({
+        result = {
             'success': True,
             'perth': perth[:10],
             'south': south[:10],
             'station_id': station_id,
             'last_updated': datetime.now().isoformat()
-        })
+        }
+        
+        # Update cache
+        departure_cache['data'] = result
+        departure_cache['timestamp'] = now
+        departure_cache['station_id'] = station_id
+        
+        return jsonify(result)
         
     except Exception as e:
         print(f"Error in get_departures: {e}")
